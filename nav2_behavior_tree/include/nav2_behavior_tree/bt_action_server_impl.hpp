@@ -99,7 +99,7 @@ bool BtActionServer<ActionT>::on_configure()
 
   // Put items on the blackboard
   blackboard_->set<rclcpp::Node::SharedPtr>("node", client_node_);  // NOLINT
-  blackboard_->set<std::chrono::milliseconds>("server_timeout", std::chrono::milliseconds(10));  // NOLINT
+  blackboard_->set<std::chrono::milliseconds>("server_timeout", std::chrono::milliseconds(3000));  // NOLINT
 
   // Get parameter for monitoring with Groot via ZMQ Publisher
   node->get_parameter("enable_groot_monitoring", enable_groot_monitoring_);
