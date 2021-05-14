@@ -59,14 +59,18 @@ SpeedController::SpeedController(
 
 inline BT::NodeStatus SpeedController::tick()
 {
-  auto current_goal = config().blackboard->get<geometry_msgs::msg::PoseStamped>("goal");
+  std::vector<geometry_msgs::msg::PoseStamped> current_goals;
+  config().blackboard->get<std::vector<geometry_msgs::msg::PoseStamped>>("goals", current_goals);
+  geometry_msgs::msg::PoseStamped current_goal;
+  config().blackboard->get<geometry_msgs::msg::PoseStamped>("goal", current_goal);
 
-  if (goal_ != current_goal) {
+  if (goal_ != current_goal || goals_ != current_goals) {
     // Reset state and set period to max since we have a new goal
     period_ = 1.0 / max_rate_;
     start_ = node_->now();
     first_tick_ = true;
     goal_ = current_goal;
+    goals_ = current_goals;
   }
 
   setStatus(BT::NodeStatus::RUNNING);
