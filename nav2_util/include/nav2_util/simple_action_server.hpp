@@ -257,6 +257,24 @@ public:
     return current_handle_->get_goal();
   }
 
+  /**
+   * @brief Terminate pending goals
+   */
+  void terminate_pending_goal()
+  {
+    std::lock_guard<std::recursive_mutex> lock(update_mutex_);
+
+    if (!pending_handle_ || !pending_handle_->is_active()) {
+      error_msg("Attempting to terminate pending goal when not available");
+      return;
+    }
+
+    terminate(pending_handle_);
+    preempt_requested_ = false;
+
+    debug_msg("Pending goal terminated");
+  }
+
   const std::shared_ptr<const typename ActionT::Goal> get_current_goal() const
   {
     std::lock_guard<std::recursive_mutex> lock(update_mutex_);
@@ -267,6 +285,22 @@ public:
     }
 
     return current_handle_->get_goal();
+  }
+
+  /**
+   * @brief Get the pending goal object
+   * @return Goal Ptr to the goal that's pending
+   */
+  const std::shared_ptr<const typename ActionT::Goal> get_pending_goal() const
+  {
+    std::lock_guard<std::recursive_mutex> lock(update_mutex_);
+
+    if (!pending_handle_ || !pending_handle_->is_active()) {
+      error_msg("Attempting to get pending goal when not available");
+      return std::shared_ptr<const typename ActionT::Goal>();
+    }
+
+    return pending_handle_->get_goal();
   }
 
   bool is_cancel_requested() const
