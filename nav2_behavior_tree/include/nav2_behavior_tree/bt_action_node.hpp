@@ -46,6 +46,7 @@ public:
     // Initialize the input and output messages
     goal_ = typename ActionT::Goal();
     result_ = typename rclcpp_action::ClientGoalHandle<ActionT>::WrappedResult();
+    waiting_loops_ = 0;
 
     std::string remapped_action_name;
     if (getInput("server_name", remapped_action_name)) {
@@ -159,9 +160,22 @@ public:
       // check if, after invoking spin_some(), we finally received the result
       if (!goal_result_available_) {
         // Yield this Action, returning RUNNING
-        return BT::NodeStatus::RUNNING;
+        // return BT::NodeStatus::RUNNING;
+        auto goal_status_ = goal_handle_->get_status();
+        if (goal_status_ == action_msgs::msg::GoalStatus::STATUS_SUCCEEDED && ++waiting_loops_ > 30) {
+          RCLCPP_INFO(node_->get_logger(),  "goal status of action server %s is in STATUS_SUCCEEDED for a long time, skip and return BT::NodeStatus::FAILURE", action_name_.c_str());
+          waiting_loops_ = 0;
+          // setStatus(BT::NodeStatus::IDLE);
+          return BT::NodeStatus::FAILURE;
+          // return BT::NodeStatus::RUNNING;
+        } else {
+          // Yield this Action, returning RUNNING
+          return BT::NodeStatus::RUNNING;
+        }
       }
     }
+
+    waiting_loops_ = 0;
 
     switch (result_.code) {
       case rclcpp_action::ResultCode::SUCCEEDED:
@@ -266,6 +280,7 @@ protected:
   // The timeout value while waiting for response from a server when a
   // new action goal is sent or canceled
   std::chrono::milliseconds server_timeout_;
+  int32_t waiting_loops_;
 };
 
 }  // namespace nav2_behavior_tree
