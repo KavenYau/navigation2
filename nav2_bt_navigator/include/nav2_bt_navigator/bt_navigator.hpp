@@ -23,6 +23,7 @@
 #include "nav2_behavior_tree/behavior_tree_engine.hpp"
 #include "nav2_util/lifecycle_node.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
+#include "nav2_msgs/action/navigate_through_poses.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "nav2_util/simple_action_server.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
@@ -87,8 +88,12 @@ protected:
 
   using ActionServer = nav2_util::SimpleActionServer<Action>;
 
+  using NavigateThroughPoseAction = nav2_msgs::action::NavigateThroughPoses;
+
+  using NavigateThroughPoseActionServer = nav2_util::SimpleActionServer<NavigateThroughPoseAction>;
   // Our action server implements the NavigateToPose action
   std::unique_ptr<ActionServer> action_server_;
+  std::unique_ptr<NavigateThroughPoseActionServer> through_poses_action_server_;
 
   /**
    * @brief Action server callbacks
@@ -107,6 +112,10 @@ protected:
   void onGoalPoseReceived(const geometry_msgs::msg::PoseStamped::SharedPtr pose);
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
 
+  void navigateThroughPoses();
+
+  void initializeGoalPoses();
+
   /**
    * @brief Replace current BT with another one
    * @param bt_xml_filename The file containing the new BT
@@ -123,6 +132,7 @@ protected:
   // The XML fiñe that cointains the Behavior Tree to create
   std::string current_bt_xml_filename_;
   std::string default_bt_xml_filename_;
+  std::string default_nav_through_poses_bt_xml_filename_;
 
   // The wrapper class for the BT functionality
   std::unique_ptr<nav2_behavior_tree::BehaviorTreeEngine> bt_;

@@ -1,0 +1,10 @@
+#goal definition
+geometry_msgs/PoseStamped[] goals
+string planner_id
+bool use_start # If true, use current robot pose as path start, if false, use start above instead
+---
+#result definition
+nav_msgs/Path path
+builtin_interfaces/Duration planning_time
+---
+#feedback

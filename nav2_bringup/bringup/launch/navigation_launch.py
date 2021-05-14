@@ -32,6 +32,7 @@ def generate_launch_description():
     autostart = LaunchConfiguration('autostart')
     params_file = LaunchConfiguration('params_file')
     default_bt_xml_filename = LaunchConfiguration('default_bt_xml_filename')
+    default_nav_through_poses_bt_xml_filename = LaunchConfiguration('default_nav_through_poses_bt_xml_filename')
     map_subscribe_transient_local = LaunchConfiguration('map_subscribe_transient_local')
 
     lifecycle_nodes = ['controller_server',
@@ -53,6 +54,7 @@ def generate_launch_description():
     param_substitutions = {
         'use_sim_time': use_sim_time,
         'default_bt_xml_filename': default_bt_xml_filename,
+        'default_nav_through_poses_bt_xml': default_nav_through_poses_bt_xml_filename,
         'autostart': autostart,
         'map_subscribe_transient_local': map_subscribe_transient_local}
 
@@ -89,6 +91,13 @@ def generate_launch_description():
                 get_package_share_directory('nav2_bt_navigator'),
                 'behavior_trees', 'navigate_w_replanning_and_recovery.xml'),
             description='Full path to the behavior tree xml file to use'),
+
+        DeclareLaunchArgument(
+        'default_nav_through_poses_bt_xml_filename',
+        default_value=os.path.join(
+            get_package_share_directory('nav2_bt_navigator'),
+            'behavior_trees', 'navigate_through_poses_w_replanning_and_recovery.xml'),
+        description='Full path to the navigate_through_poses behavior tree xml file to use'),
 
         DeclareLaunchArgument(
             'map_subscribe_transient_local', default_value='false',

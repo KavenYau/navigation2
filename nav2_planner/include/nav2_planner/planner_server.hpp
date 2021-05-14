@@ -26,6 +26,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "nav2_util/lifecycle_node.hpp"
 #include "nav2_msgs/action/compute_path_to_pose.hpp"
+#include "nav2_msgs/action/compute_path_through_poses.hpp"
 #include "nav2_msgs/msg/costmap.hpp"
 #include "nav2_util/robot_utils.hpp"
 #include "nav2_util/simple_action_server.hpp"
@@ -104,13 +105,19 @@ protected:
   using ActionT = nav2_msgs::action::ComputePathToPose;
   using ActionServer = nav2_util::SimpleActionServer<ActionT>;
 
+  using ActionThroughPoses = nav2_msgs::action::ComputePathThroughPoses;
+  using ActionServerThroughPoses = nav2_util::SimpleActionServer<ActionThroughPoses>;
+
   // Our action server implements the ComputePathToPose action
   std::unique_ptr<ActionServer> action_server_;
+  std::unique_ptr<ActionServerThroughPoses> action_server_poses_;
 
   /**
    * @brief The action server callback which calls planner to get the path
    */
   void computePlan();
+
+  void computePlanThroughPoses();
 
   /**
    * @brief Publish a path for visualization purposes

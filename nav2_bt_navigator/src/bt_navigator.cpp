@@ -39,6 +39,7 @@ BtNavigator::BtNavigator()
 
   const std::vector<std::string> plugin_libs = {
     "nav2_compute_path_to_pose_action_bt_node",
+    "nav2_compute_path_through_poses_action_bt_node"
     "nav2_follow_path_action_bt_node",
     "nav2_back_up_action_bt_node",
     "nav2_spin_action_bt_node",
@@ -64,6 +65,8 @@ BtNavigator::BtNavigator()
     "nav2_is_battery_low_condition_bt_node",
     "nav2_goal_updater_node_bt_node",
     "nav2_navigate_to_pose_action_bt_node",
+    "nav2_navigate_through_poses_action_bt_node",
+    "nav2_remove_passed_goals_action_bt_node",
   };
 
   // Declare this node's parameters
@@ -76,6 +79,8 @@ BtNavigator::BtNavigator()
   declare_parameter("enable_groot_monitoring", true);
   declare_parameter("groot_zmq_publisher_port", 1666);
   declare_parameter("groot_zmq_server_port", 1667);
+  declare_parameter("default_nav_through_poses_bt_xml");
+  
 }
 
 BtNavigator::~BtNavigator()
@@ -118,6 +123,13 @@ BtNavigator::on_configure(const rclcpp_lifecycle::State & /*state*/)
     get_node_waitables_interface(),
     "navigate_to_pose", std::bind(&BtNavigator::navigateToPose, this), false);
 
+  through_poses_action_server_= std::make_unique<NavigateThroughPoseActionServer>(
+    get_node_base_interface(),
+    get_node_clock_interface(),
+    get_node_logging_interface(),
+    get_node_waitables_interface(),
+    "navigate_through_poses", std::bind(&BtNavigator::navigateThroughPoses, this), false);
+
   // Get the libraries to pull plugins from
   plugin_lib_names_ = get_parameter("plugin_lib_names").as_string_array();
   global_frame_ = get_parameter("global_frame").as_string();
@@ -133,7 +145,7 @@ BtNavigator::on_configure(const rclcpp_lifecycle::State & /*state*/)
   // Put items on the blackboard
   blackboard_->set<rclcpp::Node::SharedPtr>("node", client_node_);  // NOLINT
   blackboard_->set<std::shared_ptr<tf2_ros::Buffer>>("tf_buffer", tf_);  // NOLINT
-  blackboard_->set<std::chrono::milliseconds>("server_timeout", std::chrono::milliseconds(10));  // NOLINT
+  blackboard_->set<std::chrono::milliseconds>("server_timeout", std::chrono::milliseconds(1000));  // NOLINT
   blackboard_->set<bool>("path_updated", false);  // NOLINT
   blackboard_->set<bool>("initial_pose_received", false);  // NOLINT
   blackboard_->set<int>("number_recoveries", 0);  // NOLINT
@@ -143,6 +155,12 @@ BtNavigator::on_configure(const rclcpp_lifecycle::State & /*state*/)
 
   if (!loadBehaviorTree(default_bt_xml_filename_)) {
     RCLCPP_ERROR(get_logger(), "Error loading XML file: %s", default_bt_xml_filename_.c_str());
+    return nav2_util::CallbackReturn::FAILURE;
+  }
+
+  get_parameter("default_nav_through_poses_bt_xml", default_nav_through_poses_bt_xml_filename_);
+  if (!loadBehaviorTree(default_nav_through_poses_bt_xml_filename_)) {
+    RCLCPP_ERROR(get_logger(), "Error loading XML file: %s", default_nav_through_poses_bt_xml_filename_.c_str());
     return nav2_util::CallbackReturn::FAILURE;
   }
 
@@ -197,6 +215,7 @@ BtNavigator::on_activate(const rclcpp_lifecycle::State & /*state*/)
   RCLCPP_INFO(get_logger(), "Activating");
 
   action_server_->activate();
+  through_poses_action_server_->activate();
 
   return nav2_util::CallbackReturn::SUCCESS;
 }
@@ -207,6 +226,7 @@ BtNavigator::on_deactivate(const rclcpp_lifecycle::State & /*state*/)
   RCLCPP_INFO(get_logger(), "Deactivating");
 
   action_server_->deactivate();
+  through_poses_action_server_->deactivate();
 
   return nav2_util::CallbackReturn::SUCCESS;
 }
@@ -227,6 +247,7 @@ BtNavigator::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
   tf_.reset();
 
   action_server_.reset();
+  through_poses_action_server_.reset();
   plugin_lib_names_.clear();
   current_bt_xml_filename_.clear();
   blackboard_.reset();
@@ -353,6 +374,116 @@ BtNavigator::onGoalPoseReceived(const geometry_msgs::msg::PoseStamped::SharedPtr
   nav2_msgs::action::NavigateToPose::Goal goal;
   goal.pose = *pose;
   self_client_->async_send_goal(goal);
+}
+
+void
+BtNavigator::navigateThroughPoses()
+{
+  initializeGoalPoses();
+
+  auto is_canceling = [&]() {
+      if (through_poses_action_server_ == nullptr) {
+        RCLCPP_DEBUG(get_logger(), "Action server unavailable. Canceling.");
+        return true;
+      }
+
+      if (!through_poses_action_server_->is_server_active()) {
+        RCLCPP_DEBUG(get_logger(), "Action server is inactive. Canceling.");
+        return true;
+      }
+
+      return through_poses_action_server_->is_cancel_requested();
+    };
+
+  std::string bt_xml_filename = through_poses_action_server_->get_current_goal()->behavior_tree;
+
+  // Empty id in request is default for backward compatibility
+  bt_xml_filename = bt_xml_filename == "" ? default_nav_through_poses_bt_xml_filename_ : bt_xml_filename;
+
+  if (!loadBehaviorTree(bt_xml_filename)) {
+    RCLCPP_ERROR(
+      get_logger(), "BT file not found: %s. Navigation canceled.",
+      bt_xml_filename.c_str());
+    through_poses_action_server_->terminate_current();
+    return;
+  }
+
+  RosTopicLogger topic_logger(client_node_, tree_);
+  std::shared_ptr<NavigateThroughPoseAction::Feedback> feedback_msg = std::make_shared<NavigateThroughPoseAction::Feedback>();
+
+  auto on_loop = [&]() {
+      if (through_poses_action_server_->is_preempt_requested()) {
+        RCLCPP_INFO(get_logger(), "Received goal preemption request");
+        through_poses_action_server_->accept_pending_goal();
+        initializeGoalPoses();
+      }
+      topic_logger.flush();
+
+      // action server feedback (pose, duration of task,
+      // number of recoveries, and distance remaining to goal)
+      nav2_util::getCurrentPose(
+        feedback_msg->current_pose, *tf_, global_frame_, robot_frame_, transform_tolerance_);
+
+      std::vector<geometry_msgs::msg::PoseStamped> goal_poses;
+      blackboard_->get("goals", goal_poses);
+
+      if (goal_poses.empty()) {
+        RCLCPP_INFO(get_logger(), "goal poses empty");
+        return;
+      }
+
+      feedback_msg->distance_remaining = nav2_util::geometry_utils::euclidean_distance(
+        feedback_msg->current_pose.pose, goal_poses.back().pose);
+
+      int recovery_count = 0;
+      blackboard_->get<int>("number_recoveries", recovery_count);
+      feedback_msg->number_of_recoveries = recovery_count;
+      feedback_msg->navigation_time = now() - start_time_;
+      through_poses_action_server_->publish_feedback(feedback_msg);
+    };
+
+  // Execute the BT that was previously created in the configure step
+  nav2_behavior_tree::BtStatus rc = bt_->run(&tree_, on_loop, is_canceling);
+  // Make sure that the Bt is not in a running state from a previous execution
+  // note: if all the ControlNodes are implemented correctly, this is not needed.
+  bt_->haltAllActions(tree_.rootNode());
+
+  switch (rc) {
+    case nav2_behavior_tree::BtStatus::SUCCEEDED:
+      RCLCPP_INFO(get_logger(), "Navigation succeeded");
+      through_poses_action_server_->succeeded_current();
+      break;
+
+    case nav2_behavior_tree::BtStatus::FAILED:
+      RCLCPP_ERROR(get_logger(), "Navigation failed");
+      through_poses_action_server_->terminate_current();
+      break;
+
+    case nav2_behavior_tree::BtStatus::CANCELED:
+      RCLCPP_INFO(get_logger(), "Navigation canceled");
+      through_poses_action_server_->terminate_all();
+      break;
+  }
+}
+
+void
+BtNavigator::initializeGoalPoses()
+{
+  auto goal = through_poses_action_server_->get_current_goal();
+
+  if (goal->poses.size() > 0) {
+    RCLCPP_INFO(
+      get_logger(), "Begin navigating from current location through %li poses to (%.2f, %.2f)",
+      goal->poses.size(), goal->poses.back().pose.position.x, goal->poses.back().pose.position.y);
+  }
+
+  // Reset state for new action feedback
+  start_time_ = now();
+  // auto blackboard = bt_action_server_->getBlackboard();
+  blackboard_->set<int>("number_recoveries", 0);  // NOLINT
+
+  // Update the goal pose on the blackboard
+  blackboard_->set<std::vector<geometry_msgs::msg::PoseStamped>>("goals", goal->poses);
 }
 
 }  // namespace nav2_bt_navigator

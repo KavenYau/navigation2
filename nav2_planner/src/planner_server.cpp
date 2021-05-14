@@ -135,6 +135,11 @@ PlannerServer::on_configure(const rclcpp_lifecycle::State & state)
     "compute_path_to_pose",
     std::bind(&PlannerServer::computePlan, this));
 
+  action_server_poses_ = std::make_unique<ActionServerThroughPoses>(
+    rclcpp_node_,
+    "compute_path_through_poses",
+    std::bind(&PlannerServer::computePlanThroughPoses, this));
+
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
@@ -145,6 +150,7 @@ PlannerServer::on_activate(const rclcpp_lifecycle::State & state)
 
   plan_publisher_->on_activate();
   action_server_->activate();
+  action_server_poses_->activate();
   costmap_ros_->on_activate(state);
 
   PlannerMap::iterator it;
@@ -161,6 +167,7 @@ PlannerServer::on_deactivate(const rclcpp_lifecycle::State & state)
   RCLCPP_INFO(get_logger(), "Deactivating");
 
   action_server_->deactivate();
+  action_server_poses_->deactivate();
   plan_publisher_->on_deactivate();
   costmap_ros_->on_deactivate(state);
 
@@ -178,6 +185,7 @@ PlannerServer::on_cleanup(const rclcpp_lifecycle::State & state)
   RCLCPP_INFO(get_logger(), "Cleaning up");
 
   action_server_.reset();
+  action_server_poses_.reset();
   plan_publisher_.reset();
   tf_.reset();
   costmap_ros_->on_cleanup(state);
@@ -200,6 +208,113 @@ PlannerServer::on_shutdown(const rclcpp_lifecycle::State &)
 }
 
 void
+PlannerServer::computePlanThroughPoses()
+{
+  auto start_time = steady_clock_.now();
+
+  // Initialize the ComputePathToPose goal and result
+  auto goal = action_server_poses_->get_current_goal();
+  auto result = std::make_shared<ActionThroughPoses::Result>();
+  nav_msgs::msg::Path concat_path;
+
+  try {
+    if (action_server_poses_ == nullptr || !action_server_poses_->is_server_active()) {
+      RCLCPP_DEBUG(get_logger(), "ComputePathThroughPoses Action server unavailable or inactive. Stopping.");
+      return;
+    }
+
+    if (action_server_poses_->is_cancel_requested()) {
+      RCLCPP_INFO(get_logger(), "Goal was canceled. Canceling planning action.");
+      action_server_poses_->terminate_all();
+      return;
+    }
+
+    if (goal->goals.size() == 0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Compute path through poses requested a plan with no viapoint poses, returning.");
+      action_server_poses_->terminate_current();
+    }
+
+    // Use start pose if provided otherwise use current robot pose
+    geometry_msgs::msg::PoseStamped start;
+    if (!costmap_ros_->getRobotPose(start)) {
+      action_server_poses_->terminate_current();
+      return;
+    }
+
+    if (action_server_poses_->is_preempt_requested()) {
+      goal = action_server_poses_->accept_pending_goal();
+    }
+
+    // Get consecutive paths through these points
+    std::vector<geometry_msgs::msg::PoseStamped>::iterator goal_iter;
+    geometry_msgs::msg::PoseStamped curr_start, curr_goal;
+    for (unsigned int i = 0; i != goal->goals.size(); i++) {
+      // Get starting point
+      if (i == 0) {
+        curr_start = start;
+      } else {
+        curr_start = goal->goals[i - 1];
+      }
+      curr_goal = goal->goals[i];
+
+      // Transform them into the global frame
+      // if (!transformPosesToGlobalFrame(action_server_poses_, curr_start, curr_goal)) {
+      //   return;
+      // }
+
+      // Get plan from start -> goal
+      nav_msgs::msg::Path curr_path = getPlan(curr_start, curr_goal, goal->planner_id);
+
+      // check path for validity
+      if (curr_path.poses.size() == 0) {
+        RCLCPP_WARN(
+          get_logger(), "Planning algorithm %s failed to generate a valid"
+          " path to (%.2f, %.2f)", goal->planner_id.c_str(),
+          curr_goal.pose.position.x, curr_goal.pose.position.y);
+        action_server_poses_->terminate_current();
+        return;
+      }
+
+      RCLCPP_DEBUG(
+        get_logger(),
+        "Found valid path of size %u to (%.2f, %.2f)",
+        curr_path.poses.size(), curr_goal.pose.position.x,
+        curr_goal.pose.position.y);
+
+      // Concatenate paths together
+      concat_path.poses.insert(
+        concat_path.poses.end(), curr_path.poses.begin(), curr_path.poses.end());
+      concat_path.header = curr_path.header;
+    }
+
+    // Publish the plan for visualization purposes
+    result->path = concat_path;
+    publishPlan(result->path);
+
+    auto cycle_duration = steady_clock_.now() - start_time;
+    result->planning_time = cycle_duration;
+
+    if (max_planner_duration_ && cycle_duration.seconds() > max_planner_duration_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Planner loop missed its desired rate of %.4f Hz. Current loop rate is %.4f Hz",
+        1 / max_planner_duration_, 1 / cycle_duration.seconds());
+    }
+
+    action_server_poses_->succeeded_current(result);
+  } catch (std::exception & ex) {
+    RCLCPP_WARN(
+      get_logger(),
+      "%s plugin failed to plan through %li points with final goal (%.2f, %.2f): \"%s\"",
+      goal->planner_id.c_str(), goal->goals.size(), goal->goals.back().pose.position.x,
+      goal->goals.back().pose.position.y, ex.what());
+    action_server_poses_->terminate_current();
+  }
+}
+
+void
 PlannerServer::computePlan()
 {
   auto start_time = steady_clock_.now();
@@ -210,7 +325,7 @@ PlannerServer::computePlan()
 
   try {
     if (action_server_ == nullptr || !action_server_->is_server_active()) {
-      RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
+      RCLCPP_DEBUG(get_logger(), "ComputePathToPose Action server unavailable or inactive. Stopping.");
       return;
     }
 
@@ -229,6 +344,11 @@ PlannerServer::computePlan()
     if (action_server_->is_preempt_requested()) {
       goal = action_server_->accept_pending_goal();
     }
+
+    // Transform them into the global frame
+    // if (!transformPosesToGlobalFrame(action_server_, start, goal_pose)) {
+    //   return;
+    // }
 
     result->path = getPlan(start, goal->pose, goal->planner_id);
 
